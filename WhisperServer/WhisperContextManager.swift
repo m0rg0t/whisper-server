@@ -2,6 +2,54 @@ import Foundation
 import Darwin
 import whisper
 
+/// Small deterministic state machine for the shared Whisper context lifecycle.
+/// Kept separate from timers and whisper.cpp calls so lifecycle behavior can be unit tested.
+struct WhisperContextLifecycleState {
+    private(set) var activeUseCount = 0
+    private(set) var pendingFree = false
+
+    mutating func acquire() {
+        activeUseCount += 1
+    }
+
+    /// Returns true when an inactivity timeout may release the shared context now.
+    func canReleaseForInactivity() -> Bool {
+        activeUseCount == 0
+    }
+
+    /// Requests a model reinitialization.
+    /// - Returns: true if the context may be freed immediately; false if freeing must be deferred.
+    mutating func requestReinitialization() -> Bool {
+        guard activeUseCount > 0 else {
+            return true
+        }
+
+        pendingFree = true
+        return false
+    }
+
+    /// Releases one active lease.
+    /// - Returns: true when the final lease should perform a previously deferred free.
+    mutating func release() -> Bool {
+        guard activeUseCount > 0 else {
+            return false
+        }
+
+        activeUseCount -= 1
+        guard activeUseCount == 0, pendingFree else {
+            return false
+        }
+
+        pendingFree = false
+        return true
+    }
+
+    mutating func reset() {
+        activeUseCount = 0
+        pendingFree = false
+    }
+}
+
 /// Manages Whisper context lifecycle, memory usage, and Metal shader caching
 class WhisperContextManager {
     
@@ -10,15 +58,7 @@ class WhisperContextManager {
     /// Shared context and lock for thread-safe access
     private static var sharedContext: OpaquePointer?
     private static let lock = NSLock()
-
-    /// Number of transcription operations currently using the shared context.
-    /// While non-zero the shared context must never be freed: whisper_full may
-    /// still be running on it outside the lock.
-    private static var activeUseCount = 0
-
-    /// Set when a free was requested (inactivity timeout or model switch) while
-    /// the context was in use; the free is performed by the last releaseContext().
-    private static var pendingFree = false
+    private static var lifecycleState = WhisperContextLifecycleState()
     private static let logQueue = DispatchQueue(label: "com.whisperserver.whisper.log", qos: .utility)
     private static var isLoggingConfigured = false
 
@@ -69,7 +109,7 @@ class WhisperContextManager {
 
             // A transcription is still running on the context; freeing it now
             // would be a use-after-free. releaseContext() restarts the timer.
-            guard activeUseCount == 0 else { return }
+            guard lifecycleState.canReleaseForInactivity() else { return }
 
             freeSharedContextUnsafe()
         }
@@ -95,7 +135,7 @@ class WhisperContextManager {
         guard let context = getOrCreateContextUnsafe(modelPaths: modelPaths) else {
             return nil
         }
-        activeUseCount += 1
+        lifecycleState.acquire()
         return context
     }
 
@@ -105,9 +145,7 @@ class WhisperContextManager {
     static func releaseContext() {
         lock.lock(); defer { lock.unlock() }
 
-        activeUseCount = max(0, activeUseCount - 1)
-        if activeUseCount == 0 && pendingFree {
-            pendingFree = false
+        if lifecycleState.release() {
             freeSharedContextUnsafe()
         }
         resetInactivityTimer()
@@ -118,27 +156,21 @@ class WhisperContextManager {
         // Directory for storing the Metal shader cache
         var cacheDirectory: URL
         
-        // Create path to cache folder in Application Support
         if let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
             let bundleId = Bundle.main.bundleIdentifier ?? "com.whisperserver"
             let whisperCacheDir = appSupportDir.appendingPathComponent(bundleId).appendingPathComponent("MetalCache")
             
-            // Create the directory if it doesn't exist
             do {
                 try FileManager.default.createDirectory(at: whisperCacheDir, withIntermediateDirectories: true)
                 cacheDirectory = whisperCacheDir
-                // Directory ensured; optional cache inspection omitted
             } catch {
-                // Use temporary directory as a fallback
                 cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("WhisperMetalCache")
             }
             
-            // Set environment variables for Metal
             setenv("MTL_SHADER_CACHE_PATH", cacheDirectory.path, 1)
             setenv("MTL_SHADER_CACHE", "1", 1)
             setenv("MTL_SHADER_CACHE_SKIP_VALIDATION", "1", 1)
             
-            // Additional settings for cache debugging
             #if DEBUG
             setenv("MTL_DEBUG_SHADER_CACHE", "1", 1)
             #endif
@@ -153,10 +185,8 @@ class WhisperContextManager {
         }
         
         lock.lock(); defer { lock.unlock() }
-        if let ctx = sharedContext {
-            whisper_free(ctx)
-            sharedContext = nil
-        }
+        freeSharedContextUnsafe()
+        lifecycleState.reset()
     }
     
     /// Forcibly releases and reinitializes the Whisper context when the model changes
@@ -165,9 +195,7 @@ class WhisperContextManager {
 
         // Free the current context, or defer the free if a transcription is
         // still running on it (the last releaseContext() will perform it).
-        if activeUseCount > 0 {
-            pendingFree = true
-        } else {
+        if lifecycleState.requestReinitialization() {
             freeSharedContextUnsafe()
         }
 
@@ -183,7 +211,6 @@ class WhisperContextManager {
     /// Forces release of the current Whisper context for memory isolation between chunks
     /// This function MUST be called from within a lock.
     static func resetContextForChunk() {
-        // Release current context if it exists
         if let ctx = sharedContext {
             whisper_free(ctx)
             sharedContext = nil
@@ -203,7 +230,6 @@ class WhisperContextManager {
 
         let binPath = paths.binPath
 
-        // Verify file exists and can be accessed
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: binPath.path),
               fileManager.isReadableFile(atPath: binPath.path) else {
@@ -214,9 +240,8 @@ class WhisperContextManager {
 
         contextParams.use_gpu = true
         contextParams.flash_attn = true
-        // Additional Metal optimizations
-        setenv("WHISPER_METAL_NDIM", "128", 1)  // Optimization for batch size
-        setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Allocate more memory for Metal
+        setenv("WHISPER_METAL_NDIM", "128", 1)
+        setenv("WHISPER_METAL_MEM_MB", "1024", 1)
 
         guard let isolatedContext = whisper_init_from_file_with_params(binPath.path, contextParams) else {
             return nil
@@ -234,7 +259,6 @@ class WhisperContextManager {
             return false
         }
 
-        // Use the unified getOrCreateContext method
         if getOrCreateContext(modelPaths: paths) != nil {
             return true
         } else {
@@ -248,7 +272,6 @@ class WhisperContextManager {
     static func getOrCreateContext(modelPaths: (binPath: URL, encoderDir: URL)?) -> OpaquePointer? {
         lock.lock(); defer { lock.unlock() }
         
-        // Reset the inactivity timer since we're using Whisper now
         resetInactivityTimer()
         
         return getOrCreateContextUnsafe(modelPaths: modelPaths)
@@ -258,12 +281,10 @@ class WhisperContextManager {
     /// - Parameter modelPaths: The paths to the model files.
     /// - Returns: An `OpaquePointer` to the Whisper context, or `nil` on failure.
     static func getOrCreateContextUnsafe(modelPaths: (binPath: URL, encoderDir: URL)?) -> OpaquePointer? {
-        // If context already exists, we're done.
         if let existingContext = sharedContext {
             return existingContext
         }
 
-        // If no context, we must create one. We need model paths.
         guard let paths = modelPaths else {
             return nil
         }
@@ -272,24 +293,20 @@ class WhisperContextManager {
 
         let binPath = paths.binPath
 
-        // Verify file exists and can be accessed
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: binPath.path),
               fileManager.isReadableFile(atPath: binPath.path) else {
             return nil
         }
 
-        // Log file size for debugging
         _ = fileManager
 
         var contextParams = whisper_context_default_params()
 
         contextParams.use_gpu = true
         contextParams.flash_attn = true
-        // Additional Metal optimizations
-        setenv("WHISPER_METAL_NDIM", "128", 1)  // Optimization for batch size
-        setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Allocate more memory for Metal
-        // Metal settings configured via env vars
+        setenv("WHISPER_METAL_NDIM", "128", 1)
+        setenv("WHISPER_METAL_MEM_MB", "1024", 1)
 
         guard let newContext = whisper_init_from_file_with_params(binPath.path, contextParams) else {
             return nil
@@ -298,7 +315,6 @@ class WhisperContextManager {
         sharedContext = newContext
         configureLoggingIfNeeded()
         
-        // Send notification that Metal is active
         DispatchQueue.main.async {
             let modelName = extractModelNameFromPath(paths.binPath)
             NotificationCenter.default.post(
