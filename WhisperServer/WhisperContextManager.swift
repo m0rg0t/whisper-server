@@ -156,21 +156,27 @@ class WhisperContextManager {
         // Directory for storing the Metal shader cache
         var cacheDirectory: URL
         
+        // Create path to cache folder in Application Support
         if let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
             let bundleId = Bundle.main.bundleIdentifier ?? "com.whisperserver"
             let whisperCacheDir = appSupportDir.appendingPathComponent(bundleId).appendingPathComponent("MetalCache")
             
+            // Create the directory if it doesn't exist
             do {
                 try FileManager.default.createDirectory(at: whisperCacheDir, withIntermediateDirectories: true)
                 cacheDirectory = whisperCacheDir
+                // Directory ensured; optional cache inspection omitted
             } catch {
+                // Use temporary directory as a fallback
                 cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("WhisperMetalCache")
             }
             
+            // Set environment variables for Metal
             setenv("MTL_SHADER_CACHE_PATH", cacheDirectory.path, 1)
             setenv("MTL_SHADER_CACHE", "1", 1)
             setenv("MTL_SHADER_CACHE_SKIP_VALIDATION", "1", 1)
             
+            // Additional settings for cache debugging
             #if DEBUG
             setenv("MTL_DEBUG_SHADER_CACHE", "1", 1)
             #endif
@@ -211,6 +217,7 @@ class WhisperContextManager {
     /// Forces release of the current Whisper context for memory isolation between chunks
     /// This function MUST be called from within a lock.
     static func resetContextForChunk() {
+        // Release current context if it exists
         if let ctx = sharedContext {
             whisper_free(ctx)
             sharedContext = nil
@@ -230,6 +237,7 @@ class WhisperContextManager {
 
         let binPath = paths.binPath
 
+        // Verify file exists and can be accessed
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: binPath.path),
               fileManager.isReadableFile(atPath: binPath.path) else {
@@ -240,8 +248,9 @@ class WhisperContextManager {
 
         contextParams.use_gpu = true
         contextParams.flash_attn = true
-        setenv("WHISPER_METAL_NDIM", "128", 1)
-        setenv("WHISPER_METAL_MEM_MB", "1024", 1)
+        // Additional Metal optimizations
+        setenv("WHISPER_METAL_NDIM", "128", 1)  // Optimization for batch size
+        setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Allocate more memory for Metal
 
         guard let isolatedContext = whisper_init_from_file_with_params(binPath.path, contextParams) else {
             return nil
@@ -259,6 +268,7 @@ class WhisperContextManager {
             return false
         }
 
+        // Use the unified getOrCreateContext method
         if getOrCreateContext(modelPaths: paths) != nil {
             return true
         } else {
@@ -272,6 +282,7 @@ class WhisperContextManager {
     static func getOrCreateContext(modelPaths: (binPath: URL, encoderDir: URL)?) -> OpaquePointer? {
         lock.lock(); defer { lock.unlock() }
         
+        // Reset the inactivity timer since we're using Whisper now
         resetInactivityTimer()
         
         return getOrCreateContextUnsafe(modelPaths: modelPaths)
@@ -281,10 +292,12 @@ class WhisperContextManager {
     /// - Parameter modelPaths: The paths to the model files.
     /// - Returns: An `OpaquePointer` to the Whisper context, or `nil` on failure.
     static func getOrCreateContextUnsafe(modelPaths: (binPath: URL, encoderDir: URL)?) -> OpaquePointer? {
+        // If context already exists, we're done.
         if let existingContext = sharedContext {
             return existingContext
         }
 
+        // If no context, we must create one. We need model paths.
         guard let paths = modelPaths else {
             return nil
         }
@@ -293,20 +306,24 @@ class WhisperContextManager {
 
         let binPath = paths.binPath
 
+        // Verify file exists and can be accessed
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: binPath.path),
               fileManager.isReadableFile(atPath: binPath.path) else {
             return nil
         }
 
+        // Log file size for debugging
         _ = fileManager
 
         var contextParams = whisper_context_default_params()
 
         contextParams.use_gpu = true
         contextParams.flash_attn = true
-        setenv("WHISPER_METAL_NDIM", "128", 1)
-        setenv("WHISPER_METAL_MEM_MB", "1024", 1)
+        // Additional Metal optimizations
+        setenv("WHISPER_METAL_NDIM", "128", 1)  // Optimization for batch size
+        setenv("WHISPER_METAL_MEM_MB", "1024", 1) // Allocate more memory for Metal
+        // Metal settings configured via env vars
 
         guard let newContext = whisper_init_from_file_with_params(binPath.path, contextParams) else {
             return nil
@@ -315,6 +332,7 @@ class WhisperContextManager {
         sharedContext = newContext
         configureLoggingIfNeeded()
         
+        // Send notification that Metal is active
         DispatchQueue.main.async {
             let modelName = extractModelNameFromPath(paths.binPath)
             NotificationCenter.default.post(
