@@ -43,11 +43,6 @@ struct WhisperContextLifecycleState {
         pendingFree = false
         return true
     }
-
-    mutating func reset() {
-        activeUseCount = 0
-        pendingFree = false
-    }
 }
 
 /// Manages Whisper context lifecycle, memory usage, and Metal shader caching
@@ -183,16 +178,9 @@ class WhisperContextManager {
         }
     }
     
-    /// Frees resources on application termination
+    /// Requests resource release on termination without invalidating an in-flight lease.
     static func cleanup() {
-        DispatchQueue.main.async {
-            inactivityTimer?.invalidate()
-            inactivityTimer = nil
-        }
-        
-        lock.lock(); defer { lock.unlock() }
-        freeSharedContextUnsafe()
-        lifecycleState.reset()
+        reinitializeContext()
     }
     
     /// Forcibly releases and reinitializes the Whisper context when the model changes
@@ -214,14 +202,9 @@ class WhisperContextManager {
         }
     }
     
-    /// Forces release of the current Whisper context for memory isolation between chunks
-    /// This function MUST be called from within a lock.
+    /// Requests a context reset while respecting active leases and acquiring the manager lock.
     static func resetContextForChunk() {
-        // Release current context if it exists
-        if let ctx = sharedContext {
-            whisper_free(ctx)
-            sharedContext = nil
-        }
+        reinitializeContext()
     }
     
     /// Creates an isolated Whisper context for chunk processing that doesn't interfere with shared context

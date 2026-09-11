@@ -185,7 +185,7 @@ struct WhisperTranscriptionService {
     /// Configures audio chunking parameters (only affects traditional chunking when VAD is disabled)
     /// - Parameters:
     ///   - maxDuration: Maximum duration for traditional chunks when VAD is disabled (minimum 10 seconds)
-    ///   - overlap: Overlap between traditional chunks (will be clamped to minimum 0 seconds)
+    ///   - overlap: Overlap between traditional chunks in seconds (will be clamped to minimum 0 seconds)
     static func setChunkingParameters(maxDuration: Double, overlap: Double = 0.0) {
         let previousMaxDuration = maxChunkDuration
         let previousOverlap = chunkOverlap
@@ -349,7 +349,7 @@ struct WhisperTranscriptionService {
     
     /// Streams transcription as text by processing chunks and calling onSegment for each text chunk
     /// - Parameters:
-    ///   - audioURL: URL of the original file
+    ///   - audioURL: URL of the original audio file
     ///   - language: Audio language code (optional)
     ///   - prompt: Prompt to improve recognition (optional)  
     ///   - modelPaths: Optional model paths to use for initialization
@@ -459,7 +459,7 @@ struct WhisperTranscriptionService {
                                                modelName: String?) -> [TranscriptionSegment]? {
         guard !chunks.isEmpty else {
             print("❌ No audio chunks to process")
-            reportTranscriptionProgress(processedChunks: 0, totalChunks: chunks.count, isProcessing: false, modelName: modelName)
+            reportTranscriptionProgress(progress: 0.0, isProcessing: false, modelName: modelName)
             return nil
         }
 
