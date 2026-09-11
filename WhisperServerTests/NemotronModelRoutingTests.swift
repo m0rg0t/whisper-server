@@ -1,4 +1,5 @@
 import XCTest
+import FluidAudio
 @testable import WhisperServer
 
 final class NemotronModelRoutingTests: XCTestCase {
@@ -40,13 +41,18 @@ final class NemotronModelRoutingTests: XCTestCase {
         XCTAssertNil(NemotronTranscriptionService.variant(forModelID: "parakeet-tdt-0.6b-v3"))
     }
 
-    func testNemotronCacheDirectoriesAreDistinct() {
+    func testNemotronCacheDirectoriesMatchDownloaders() {
+        let base = NemotronTranscriptionService.cacheBaseDirectory()
         let english = NemotronTranscriptionService.cacheDirectory(for: .english)
         let multilingual = NemotronTranscriptionService.cacheDirectory(for: .multilingual)
         XCTAssertNotEqual(english, multilingual)
         XCTAssertEqual(
-            english.deletingLastPathComponent(),
-            NemotronTranscriptionService.cacheBaseDirectory()
+            english,
+            base.appendingPathComponent(NemotronChunkSize.ms2240.repo.folderName, isDirectory: true)
+        )
+        XCTAssertEqual(
+            multilingual,
+            base.appendingPathComponent(Repo.nemotronMultilingual.folderName, isDirectory: true)
         )
     }
 }

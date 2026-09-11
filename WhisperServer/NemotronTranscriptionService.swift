@@ -41,20 +41,22 @@ struct NemotronTranscriptionService {
             .appendingPathComponent("FluidAudio", isDirectory: true)
     }
 
-    /// Cache directory for a variant's downloaded models (for download-state UI and deletion).
-    static func cacheDirectory(for variant: Variant) -> URL {
+    /// Match the downloader's local layout, which differs from the Hugging Face repo names.
+    /// The multilingual root includes both Latin and full multilingual vocabulary caches.
+    static func cacheDirectory(for variant: Variant, baseDirectory: URL? = nil) -> URL {
+        let base = baseDirectory ?? cacheBaseDirectory()
         switch variant {
         case .english:
-            return cacheBaseDirectory().appendingPathComponent(
-                "nemotron-speech-streaming-en-0.6b-coreml", isDirectory: true)
+            return base.appendingPathComponent(
+                NemotronChunkSize.ms2240.repo.folderName, isDirectory: true)
         case .multilingual:
-            return cacheBaseDirectory().appendingPathComponent(
-                "Nemotron-3.5-ASR-Streaming-Multilingual-0.6b-CoreML", isDirectory: true)
+            return base.appendingPathComponent(
+                Repo.nemotronMultilingual.folderName, isDirectory: true)
         }
     }
 
-    static func isModelDownloaded(_ variant: Variant) -> Bool {
-        let dir = cacheDirectory(for: variant)
+    static func isModelDownloaded(_ variant: Variant, baseDirectory: URL? = nil) -> Bool {
+        let dir = cacheDirectory(for: variant, baseDirectory: baseDirectory)
         guard let contents = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return false }
         return !contents.isEmpty
     }

@@ -614,15 +614,26 @@ final class ModelManager: @unchecked Sendable {
 
     /// Removes the FluidAudio model caches (Parakeet and Nemotron). Models re-download on next use.
     func deleteDownloadedFluidModel() throws {
-        var directories = [FluidTranscriptionService.cacheDirectory()]
-        directories.append(NemotronTranscriptionService.cacheDirectory(for: .english))
-        directories.append(NemotronTranscriptionService.cacheDirectory(for: .multilingual))
+        try Self.deleteDownloadedFluidModelCaches(
+            parakeetDirectory: FluidTranscriptionService.cacheDirectory(),
+            nemotronBaseDirectory: NemotronTranscriptionService.cacheBaseDirectory()
+        )
+        NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
+    }
+
+    /// Keep filesystem work independent of model preparation and user preferences.
+    static func deleteDownloadedFluidModelCaches(parakeetDirectory: URL, nemotronBaseDirectory: URL) throws {
+        let directories = [
+            parakeetDirectory,
+            NemotronTranscriptionService.cacheDirectory(for: .english, baseDirectory: nemotronBaseDirectory),
+            NemotronTranscriptionService.cacheDirectory(for: .multilingual, baseDirectory: nemotronBaseDirectory)
+        ]
+        let fileManager = FileManager.default
 
         for dir in directories where fileManager.fileExists(atPath: dir.path) {
             do { try fileManager.removeItem(at: dir) }
             catch { throw ModelDeletionError.fileRemovalFailed(path: dir.path, underlying: error) }
         }
-        NotificationCenter.default.post(name: .modelManagerDidUpdate, object: self)
     }
 
     // MARK: - Model Preparation (Checking & Downloading) - To be implemented
