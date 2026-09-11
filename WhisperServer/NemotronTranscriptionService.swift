@@ -169,19 +169,54 @@ struct NemotronTranscriptionService {
         await manager.cleanup()
 
         let leadPadSeconds = TimeInterval(leadPad.count) / TimeInterval(sampleRate)
-        let shifted = result.timings.map { timing in
-            TokenTiming(
-                token: timing.token,
-                tokenId: timing.tokenId,
-                startTime: max(0, timing.startTime - leadPadSeconds),
-                endTime: max(0, timing.endTime - leadPadSeconds),
-                confidence: timing.confidence
-            )
-        }
+        let shifted = restoreTokenTimings(
+            result.timings,
+            leadingPadding: leadPadSeconds,
+            duration: TimeInterval(samples.count) / TimeInterval(sampleRate)
+        )
         return (result.text, shifted)
     }
 
     // MARK: - Helpers
+
+    /// Restore the original recording's time domain without dropping final words.
+    /// FluidAudio's finish timings describe token emission, so a lexical token in
+    /// the flush padding may be delayed speech, not a silence hallucination. Keep
+    /// its text/id/confidence and anchor it to the final valid interval; timestamps
+    /// alone cannot distinguish those cases. This monotone mapping also preserves
+    /// word order when crossing-EOF and fully delayed tokens share the endpoint.
+    /// Discard explicit blank/pad tokens, not lexical tokens in the padded time range.
+    /// Word separators stay intact, but buildSegments ignores their duration. Use
+    /// the same restored timings for subtitles and diarization.
+    static func restoreTokenTimings(
+        _ timings: [TokenTiming],
+        leadingPadding: TimeInterval,
+        duration: TimeInterval
+    ) -> [TokenTiming] {
+        guard leadingPadding.isFinite, leadingPadding >= 0 else { return [] }
+        var restored: [TokenTiming] = []
+        restored.reserveCapacity(timings.count)
+        for timing in timings {
+            guard !FluidTranscriptionService.isPaddingToken(timing.token) else { continue }
+            guard let bounds = FluidTranscriptionService.boundedTimeRange(
+                start: timing.startTime - leadingPadding,
+                end: timing.endTime - leadingPadding,
+                duration: duration
+            ) else {
+                // Let the caller use the complete result.text as a bounded fallback
+                // rather than silently omitting words whose timings are unusable.
+                return []
+            }
+            restored.append(TokenTiming(
+                token: timing.token,
+                tokenId: timing.tokenId,
+                startTime: bounds.start,
+                endTime: bounds.end,
+                confidence: timing.confidence
+            ))
+        }
+        return restored
+    }
 
     /// Maps request languages ("de", "de-DE", nil) onto the FLEURS-style codes the
     /// multilingual manager expects; nil/empty means model-side auto-detection.

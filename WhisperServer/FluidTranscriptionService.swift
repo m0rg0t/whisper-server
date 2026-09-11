@@ -331,23 +331,54 @@ struct FluidTranscriptionService {
         return normalized
     }
 
+    /// Decoder padding has no user-visible text (unlike a standalone word separator).
+    static func isPaddingToken(_ token: String) -> Bool {
+        token.isEmpty || token == "<blank>" || token == "<pad>"
+    }
+
+    /// Fit a nonempty interval inside the recording, including the minimum-duration
+    /// adjustment. At EOF, move the start back instead of extending the end. A
+    /// recording shorter than the preferred minimum uses only its actual duration.
+    static func boundedTimeRange(
+        start: TimeInterval,
+        end: TimeInterval,
+        duration: TimeInterval
+    ) -> (start: TimeInterval, end: TimeInterval)? {
+        guard duration.isFinite, duration > 0,
+              start.isFinite, end.isFinite, end >= start else { return nil }
+
+        let latestStart = min(max(0, duration - minSegmentDuration), duration.nextDown)
+        let boundedStart = min(max(0, start), latestStart)
+        let boundedEnd = min(duration, max(end, boundedStart + minSegmentDuration))
+        return (boundedStart, boundedEnd)
+    }
+
     static func buildSegments(
         from tokenTimings: [TokenTiming],
         fallbackText: String,
         duration: TimeInterval
     ) -> [TranscriptionSegment] {
-        guard !tokenTimings.isEmpty else {
+        guard duration.isFinite, duration > 0 else { return [] }
+        let textTokens = tokenTimings.filter { !isPaddingToken($0.token) }
+        guard !textTokens.isEmpty else {
             return fallbackSegments(text: fallbackText, duration: duration)
         }
 
-        let sortedTokens = sortedTokenTimings(tokenTimings)
+        // Do not return a partial transcript when a decoder supplies invalid timings.
+        // Keep the complete text as one bounded fallback segment instead.
+        guard textTokens.allSatisfy({
+            $0.startTime.isFinite && $0.endTime.isFinite
+                && $0.startTime >= 0 && $0.endTime >= $0.startTime
+        }) else {
+            return fallbackSegments(text: fallbackText, duration: duration)
+        }
+        let sortedTokens = sortedTokenTimings(textTokens)
 
         var segments: [TranscriptionSegment] = []
         var currentStart: TimeInterval?
         var lastEnd: TimeInterval?
         var previousTokenEnd: TimeInterval?
         var buffer = ""
-        var invalidTokenCount = 0
 
         func closeSegment() {
             guard let start = currentStart, let end = lastEnd else {
@@ -362,25 +393,28 @@ struct FluidTranscriptionService {
             currentStart = nil
             lastEnd = nil
 
-            guard !text.isEmpty else { return }
-            let cappedEnd = min(end, duration)
-            let finalEnd = max(cappedEnd, start + minSegmentDuration)
+            guard !text.isEmpty,
+                  let bounds = boundedTimeRange(start: start, end: end, duration: duration) else { return }
             segments.append(
                 TranscriptionSegment(
-                    startTime: start,
-                    endTime: finalEnd,
+                    startTime: bounds.start,
+                    endTime: bounds.end,
                     text: text
                 )
             )
         }
 
         for token in sortedTokens {
-            // Validate token timing
-            guard token.startTime >= 0, token.endTime >= token.startTime else {
-                invalidTokenCount += 1
+            // Whitespace/word-boundary pieces still separate words, but padding-only
+            // pieces must not start a subtitle or extend the last spoken interval.
+            let visiblePiece = token.token.replacingOccurrences(of: "\u{2581}", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if visiblePiece.isEmpty {
+                buffer += token.token
+                if token.token.contains("\n") { closeSegment() }
                 continue
             }
-            
+
             let start = token.startTime
             let end = max(token.endTime, start + minSegmentDuration)
 
@@ -393,7 +427,7 @@ struct FluidTranscriptionService {
             }
 
             buffer += token.token
-            lastEnd = end
+            lastEnd = max(lastEnd ?? end, end)
 
             let trimmedToken = token.token.trimmingCharacters(in: .whitespacesAndNewlines)
             var shouldClose = false
@@ -419,10 +453,6 @@ struct FluidTranscriptionService {
 
         closeSegment()
 
-        if invalidTokenCount > 0 {
-            print("⚠️ Skipped \(invalidTokenCount) token(s) with invalid timing")
-        }
-
         if segments.isEmpty {
             print("⚠️ No valid segments created from \(sortedTokens.count) tokens, using fallback")
             return fallbackSegments(text: fallbackText, duration: duration)
@@ -433,13 +463,11 @@ struct FluidTranscriptionService {
 
     private static func fallbackSegments(text: String, duration: TimeInterval) -> [TranscriptionSegment] {
         let cleaned = normalizeSegmentText(text)
-        guard !cleaned.isEmpty else { return [] }
-
-        let fallbackDuration = max(duration, minSegmentDuration * 2)
+        guard !cleaned.isEmpty, duration.isFinite, duration > 0 else { return [] }
         return [
             TranscriptionSegment(
                 startTime: 0.0,
-                endTime: fallbackDuration,
+                endTime: duration,
                 text: cleaned
             )
         ]
