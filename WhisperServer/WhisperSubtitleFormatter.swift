@@ -49,14 +49,16 @@ struct WhisperSubtitleFormatter {
     static func formatAsSRT(segments: [TranscriptionSegment]) -> String {
         var srtString = ""
         
-        for (index, segment) in segments.enumerated() {
+        var cueNumber = 0
+        for segment in segments {
             let startTime = formatSRTTimestamp(segment.startTime)
             let endTime = formatSRTTimestamp(segment.endTime)
             let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
             
             // Skip empty segments
             if !text.isEmpty {
-                srtString += "\(index + 1)\n"
+                cueNumber += 1
+                srtString += "\(cueNumber)\n"
                 srtString += "\(startTime) --> \(endTime)\n"
                 srtString += "\(text)\n\n"
             }

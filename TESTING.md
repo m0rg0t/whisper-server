@@ -2,6 +2,33 @@
 
 This document shows how to test WhisperServer quickly and reliably. The server is compatible with the OpenAI Whisper API and runs on your Mac.
 
+## Model-free build and unit checks
+
+The PR workflow uses the standard `macos-15` Apple Silicon runner with Xcode 26.3. It builds the app and runs `WhisperServerTests` using synthetic subtitle/token data. The hosted test process sets `WHISPER_SERVER_UNIT_TESTS=1` in Debug, which avoids constructing runtime services before `ModelManager` could prepare or download models. Ordinary Debug launches and all Release launches retain their startup behavior.
+
+The previously external `whisper.xcframework` path is now reproducible under `.build/vendor/whisper.cpp/build-apple/`. To prepare it locally on an Apple Silicon Mac:
+
+```sh
+mkdir -p .build/vendor
+git clone https://github.com/ggml-org/whisper.cpp.git .build/vendor/whisper.cpp
+git -C .build/vendor/whisper.cpp checkout --detach 927cfce34f31707e17f2bff35c349632fb9e2c3a
+scripts/build-whisper-framework.sh
+```
+
+The script checks the exact official [whisper.cpp v1.9.4 source revision](https://github.com/ggml-org/whisper.cpp/tree/927cfce34f31707e17f2bff35c349632fb9e2c3a) and extracts only the macOS arm64 build from its Apple framework recipe. CoreML fallback, Metal, embedded shaders and Accelerate retain the upstream settings. Models, examples, servers and other Apple platform builds are excluded.
+
+Run unit tests with Xcode's shared scheme, or use:
+
+```sh
+xcodebuild test -project WhisperServer.xcodeproj -scheme WhisperServer \
+  -destination 'platform=macOS,arch=arm64' -only-testing:WhisperServerTests \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+Vapor uses the current stable 4.122.2 release; the 5.0 beta is outside this migration. FluidAudio is explicitly held at the existing resolved 0.7.4 because 0.17.x needs a separate API/model/hardware migration. The resolved transitive graph is verified by macOS CI. Consumer macOS 14.6 and Apple Silicon assumptions remain unchanged; the test target itself requires macOS 15.2.
+
+These tests check subtitle formatting, speaker mapping and startup isolation. They do not record audio, download models, invoke transcription, certify recognition quality, or exercise the HTTP integration commands below. CI also checks for an unexpected model directory or server listener. Model-backed integration testing remains a separate explicit action.
+
 ## TL;DR
 1) Start the app (menu bar) and wait until the server is ready at http://localhost:12017
 2) Put a small audio file in the project root (for example `jfk.wav`)

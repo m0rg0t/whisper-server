@@ -22,28 +22,43 @@ struct WhisperServerApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Properties
     
-    private let modelManager = ModelManager()
-    private let serverCoordinator: ServerCoordinator
-    private let menuBarService: MenuBarService
-    private let modelObserver: ModelObserver
-    
-    override init() {
-        serverCoordinator = ServerCoordinator(modelManager: modelManager)
-        menuBarService = MenuBarService(modelManager: modelManager)
-        modelObserver = ModelObserver(modelManager: modelManager)
-        
-        super.init()
-        
-        // Wire up dependencies
-        menuBarService.setServerCoordinator(serverCoordinator)
-        serverCoordinator.setMenuBarService(menuBarService)
-        modelObserver.setMenuBarService(menuBarService)
-        modelObserver.setServerCoordinator(serverCoordinator)
+    private struct RuntimeServices {
+        let modelManager: ModelManager
+        let serverCoordinator: ServerCoordinator
+        let menuBarService: MenuBarService
+        let modelObserver: ModelObserver
+
+        init() {
+            modelManager = ModelManager()
+            serverCoordinator = ServerCoordinator(modelManager: modelManager)
+            menuBarService = MenuBarService(modelManager: modelManager)
+            modelObserver = ModelObserver(modelManager: modelManager)
+
+            menuBarService.setServerCoordinator(serverCoordinator)
+            serverCoordinator.setMenuBarService(menuBarService)
+            modelObserver.setMenuBarService(menuBarService)
+            modelObserver.setServerCoordinator(serverCoordinator)
+        }
     }
-    
+
+    private let runtimeServices: RuntimeServices?
+    var hasRuntimeServices: Bool { runtimeServices != nil }
+
+    override init() {
+        // Hosted unit tests must not construct ModelManager: its initializer downloads models.
+        #if DEBUG
+        let isUnitTest = ProcessInfo.processInfo.environment["WHISPER_SERVER_UNIT_TESTS"] == "1"
+        runtimeServices = isUnitTest ? nil : RuntimeServices()
+        #else
+        runtimeServices = RuntimeServices()
+        #endif
+        super.init()
+    }
+
     // MARK: - Application Lifecycle
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard let services = runtimeServices else { return }
         // Make app appear only in menu bar (no dock icon)
         NSApp.setActivationPolicy(.accessory)
         
@@ -55,12 +70,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
         
         // Initialize services
-        menuBarService.setupMenuBar()
-        modelObserver.updateUIForModelPreparation()
-        serverCoordinator.startServer()
+        services.menuBarService.setupMenuBar()
+        services.modelObserver.updateUIForModelPreparation()
+        services.serverCoordinator.startServer()
     }
     
     func applicationWillTerminate(_ notification: Notification) {
-        serverCoordinator.handleApplicationTermination()
+        runtimeServices?.serverCoordinator.handleApplicationTermination()
     }
 }
