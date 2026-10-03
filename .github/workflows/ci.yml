@@ -39,11 +39,13 @@ jobs:
       - name: Build framework without models or examples
         if: steps.framework-cache.outputs.cache-hit != 'true'
         run: scripts/build-whisper-framework.sh
-      - name: Resolve compatible Swift packages
+      - name: Resolve the committed Swift package graph
         run: |
           xcodebuild -resolvePackageDependencies \
             -project WhisperServer.xcodeproj -scheme WhisperServer \
-            -clonedSourcePackagesDirPath .build/SourcePackages
+            -clonedSourcePackagesDirPath .build/SourcePackages \
+            -onlyUsePackageVersionsFromResolvedFile
+          git diff --exit-code -- WhisperServer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
       - name: Build app and run synthetic unit tests
         run: |
           set -o pipefail
