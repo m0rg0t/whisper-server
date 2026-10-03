@@ -1,0 +1,77 @@
+name: Model-free macOS checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      WHISPER_SERVER_UNIT_TESTS: '1'
+      GIT_LFS_SKIP_SMUDGE: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check selected toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          cmake --version
+      - name: Check out official whisper.cpp source
+        uses: actions/checkout@v7
+        with:
+          repository: ggml-org/whisper.cpp
+          ref: 927cfce34f31707e17f2bff35c349632fb9e2c3a
+          path: .build/vendor/whisper.cpp
+          persist-credentials: false
+          lfs: false
+      - name: Cache compiled framework
+        id: framework-cache
+        uses: actions/cache@v6
+        with:
+          path: .build/vendor/whisper.cpp/build-apple/whisper.xcframework
+          key: whisper-1.9.4-927cfce-macos-arm64-xcode26.3-coreml-metal-v1
+      - name: Build framework without models or examples
+        if: steps.framework-cache.outputs.cache-hit != 'true'
+        run: scripts/build-whisper-framework.sh
+      - name: Resolve compatible Swift packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project WhisperServer.xcodeproj -scheme WhisperServer \
+            -clonedSourcePackagesDirPath .build/SourcePackages
+      - name: Build app and run synthetic unit tests
+        run: |
+          set -o pipefail
+          xcodebuild test -project WhisperServer.xcodeproj -scheme WhisperServer \
+            -destination 'platform=macOS,arch=arm64' \
+            -only-testing:WhisperServerTests \
+            -derivedDataPath .build/DerivedData \
+            -clonedSourcePackagesDirPath .build/SourcePackages \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath .build/Tests.xcresult \
+            CODE_SIGNING_ALLOWED=NO | tee .build/xcodebuild.log
+      - name: Verify tests did not prepare models or start the server
+        if: always()
+        run: |
+          test ! -d "$HOME/Library/Application Support/pfrankov.WhisperServer/Models"
+          test ! -d "$HOME/Library/Application Support/WhisperServer/Models"
+          if lsof -nP -iTCP:12017 -sTCP:LISTEN; then
+            echo 'Unexpected server listener during model-free checks' >&2
+            exit 1
+          fi
+      - name: Upload synthetic test results and resolved versions
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-test-evidence
+          path: |
+            .build/xcodebuild.log
+            .build/Tests.xcresult
+            WhisperServer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+          if-no-files-found: error

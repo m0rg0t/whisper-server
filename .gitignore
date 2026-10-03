@@ -4,3 +4,5 @@
 .idea
 8461303220830.wav
 test-diar.m4a
+.build/
+*.xcresult
